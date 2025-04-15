@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 # Add CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://faceswaptool.netlify.app"],
+    allow_origins=["https://faceswapmagic.netlify.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
