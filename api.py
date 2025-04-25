@@ -7,7 +7,6 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from io import BytesIO
 import uvicorn
-from starlette.responses import JSONResponse
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -25,9 +24,9 @@ app.add_middleware(
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=True,
-    max_num_faces=5,  # Increased to detect multiple faces
+    max_num_faces=5,
     refine_landmarks=True,
-    min_detection_confidence=0.1,  # Lowered to improve detection
+    min_detection_confidence=0.1,
     min_tracking_confidence=0.1
 )
 
@@ -40,45 +39,6 @@ def get_landmarks(image, face_index=0):
     landmarks = [(int(landmark.x * image.shape[1]), int(landmark.y * image.shape[0]))
                  for landmark in results.multi_face_landmarks[face_index].landmark]
     return landmarks
-
-def extract_faces(image):
-    """Extracts all faces from the image and returns them as cropped images with bounding boxes."""
-    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(img_rgb)
-    faces = []
-    if not results.multi_face_landmarks:
-        return faces
-
-    for face_idx, face_landmarks in enumerate(results.multi_face_landmarks):
-        # Get bounding box for the face
-        landmarks = [(int(landmark.x * image.shape[1]), int(landmark.y * image.shape[0]))
-                     for landmark in face_landmarks.landmark]
-        x_coords = [p[0] for p in landmarks]
-        y_coords = [p[1] for p in landmarks]
-        x_min, x_max = min(x_coords), max(x_coords)
-        y_min, y_max = min(y_coords), max(y_coords)
-
-        # Add padding to the bounding box
-        padding = 20
-        x_min = max(0, x_min - padding)
-        x_max = min(image.shape[1], x_max + padding)
-        y_min = max(0, y_min - padding)
-        y_max = min(image.shape[0], y_max + padding)
-
-        # Extract the face
-        face_img = image[y_min:y_max, x_min:x_max]
-        if face_img.size == 0:
-            continue
-
-        # Encode the face image as JPEG
-        _, buffer = cv2.imencode(".jpg", face_img)
-        face_data = buffer.tobytes()
-        faces.append({
-            "index": face_idx,
-            "image": face_data,
-            "bounding_box": {"x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max}
-        })
-    return faces
 
 def align_faces(source_img, target_img, source_landmarks, target_landmarks):
     """Warps the source face to align with the target face."""
@@ -136,44 +96,6 @@ def seamless_face_swap(target_img, warped_face, target_landmarks):
     center = (int(np.mean(hull[:, 0, 0])), int(np.mean(hull[:, 0, 1])))
     result_img = cv2.seamlessClone(blended, target_img, mask.astype(np.uint8) * 255, center, cv2.NORMAL_CLONE)
     return result_img
-
-@app.post("/detect-faces/")
-async def detect_faces(target: UploadFile = File(...)):
-    """Detects and extracts all faces from the target image."""
-    try:
-        logging.info("Received request to detect faces")
-        if not target.content_type.startswith('image/'):
-            logging.error("Invalid file type for target image")
-            raise HTTPException(status_code=400, detail="Target must be an image file (e.g., JPG, PNG).")
-        if target.size > 5_000_000:
-            logging.error("Target image too large")
-            raise HTTPException(status_code=400, detail="Target image too large (max 5MB).")
-
-        target_data = await target.read()
-        target_img = cv2.imdecode(np.frombuffer(target_data, np.uint8), cv2.IMREAD_COLOR)
-        if target_img is None:
-            logging.error("Invalid target image data")
-            raise HTTPException(status_code=400, detail="Invalid target image!")
-        logging.info(f"Target image decoded: {target_img.shape}")
-
-        faces = extract_faces(target_img)
-        if not faces:
-            logging.info("No faces detected in target image")
-            raise HTTPException(status_code=400, detail="No faces detected in the target image.")
-
-        import base64
-        faces_response = []
-        for face in faces:
-            faces_response.append({
-                "index": face["index"],
-                "image_base64": base64.b64encode(face["image"]).decode('utf-8'),
-                "bounding_box": face["bounding_box"]
-            })
-        logging.info(f"Returning {len(faces_response)} faces")
-        return JSONResponse(content={"faces": faces_response})
-    except Exception as e:
-        logging.error(f"Error detecting faces: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to detect faces: {str(e)}")
 
 @app.post("/swap-faces/")
 async def swap_faces(source: UploadFile = File(...), target: UploadFile = File(...), face_index: int = 0):
