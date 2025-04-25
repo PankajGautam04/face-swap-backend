@@ -2,7 +2,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import logging
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from io import BytesIO
@@ -108,7 +108,11 @@ async def process_images(source_img: np.ndarray, target_img: np.ndarray, face_in
     return BytesIO(buffer.tobytes())
 
 @app.post("/swap-faces/")
-async def swap_faces(source: UploadFile = File(...), target: UploadFile = File(...), face_index: int = 0):
+async def swap_faces(
+    source: UploadFile = File(...),
+    target: UploadFile = File(...),
+    face_index: int = Form(0)  # Extract face_index from FormData
+):
     """Swap the face from the source image onto the selected face in the target image."""
     try:
         logging.info(f"Received swap request with face_index: {face_index}")
