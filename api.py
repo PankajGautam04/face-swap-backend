@@ -1,111 +1,220 @@
 import cv2
-import mediapipe as mp
-import numpy as np
-import logging
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from io import BytesIO
-import uvicorn
+   import mediapipe as mp
+   import numpy as np
+   import logging
+   from fastapi import FastAPI, File, UploadFile, HTTPException
+   from fastapi.responses import StreamingResponse
+   from fastapi.middleware.cors import CORSMiddleware
+   from io import BytesIO
+   import tempfile
+   import os
+   import uvicorn
+   from typing import List
+   from starlette.responses import JSONResponse
 
-app = FastAPI()
-logging.basicConfig(level=logging.INFO)
+   app = FastAPI()
+   logging.basicConfig(level=logging.INFO)
 
-# Add CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://faceswapmagic.netlify.app"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+   # Add CORS
+   app.add_middleware(
+       CORSMiddleware,
+       allow_origins=["https://faceswapmagic.netlify.app"],
+       allow_credentials=True,
+       allow_methods=["*"],
+       allow_headers=["*"],
+   )
 
-# Initialize Mediapipe Face Mesh
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=True,
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.6,
-    min_tracking_confidence=0.6
-)
+   # Initialize Mediapipe Face Mesh
+   mp_face_mesh = mp.solutions.face_mesh
+   face_mesh = mp_face_mesh.FaceMesh(
+       static_image_mode=True,
+       max_num_faces=5,  # Increased to detect multiple faces
+       refine_landmarks=True,
+       min_detection_confidence=0.5,
+       min_tracking_confidence=0.5
+   )
 
-def preprocess_image(img, max_size=640):
-    h, w = img.shape[:2]
-    scale = max_size / max(h, w)
-    if scale < 1:
-        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    return img, scale
+   def get_landmarks(image, face_index=0):
+       """Detects facial landmarks in an image for a specific face."""
+       img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+       results = face_mesh.process(img_rgb)
+       if not results.multi_face_landmarks or len(results.multi_face_landmarks) <= face_index:
+           return None
+       landmarks = [(int(landmark.x * image.shape[1]), int(landmark.y * image.shape[0]))
+                    for landmark in results.multi_face_landmarks[face_index].landmark]
+       return landmarks
 
-def get_landmarks(image):
-    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(img_rgb)
-    if not results.multi_face_landmarks:
-        logging.warning("No faces detected in the image!")
-        return None
-    landmarks = [(int(landmark.x * image.shape[1]), int(landmark.y * image.shape[0]))
-                 for landmark in results.multi_face_landmarks[0].landmark]
-    logging.info(f"Detected {len(landmarks)} landmarks")
-    return landmarks
+   def extract_faces(image):
+       """Extracts all faces from the image and returns them as cropped images with bounding boxes."""
+       img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+       results = face_mesh.process(img_rgb)
+       faces = []
+       if not results.multi_face_landmarks:
+           return faces
 
-def align_faces(source_img, target_img, source_landmarks, target_landmarks):
-    src_pts = np.float32(source_landmarks)
-    tgt_pts = np.float32(target_landmarks)
-    matrix, _ = cv2.findHomography(src_pts, tgt_pts)
-    aligned_face = cv2.warpPerspective(source_img, matrix, (target_img.shape[1], target_img.shape[0]), flags=cv2.INTER_CUBIC)
-    return aligned_face
+       for face_idx, face_landmarks in enumerate(results.multi_face_landmarks):
+           # Get bounding box for the face
+           landmarks = [(int(landmark.x * image.shape[1]), int(landmark.y * image.shape[0]))
+                        for landmark in face_landmarks.landmark]
+           x_coords = [p[0] for p in landmarks]
+           y_coords = [p[1] for p in landmarks]
+           x_min, x_max = min(x_coords), max(x_coords)
+           y_min, y_max = min(y_coords), max(y_coords)
 
-def seamless_face_swap(source_img, target_img, aligned_face, target_landmarks):
-    mask = np.zeros_like(target_img[:, :, 0])
-    hull = cv2.convexHull(np.array(target_landmarks, dtype=np.int32))
-    cv2.fillConvexPoly(mask, hull, 255)
-    
-    # Feather the edges of the mask
-    mask = cv2.GaussianBlur(mask, (21, 21), 10)
+           # Add padding to the bounding box
+           padding = 20
+           x_min = max(0, x_min - padding)
+           x_max = min(image.shape[1], x_max + padding)
+           y_min = max(0, y_min - padding)
+           y_max = min(image.shape[0], y_max + padding)
 
-    center = (int(np.mean(hull[:, 0, 0])), int(np.mean(hull[:, 0, 1])))
-    result_img = cv2.seamlessClone(aligned_face, target_img, mask, center, cv2.NORMAL_CLONE)
-    return result_img
+           # Extract the face
+           face_img = image[y_min:y_max, x_min:x_max]
+           if face_img.size == 0:
+               continue
 
-async def process_images(source_img: np.ndarray, target_img: np.ndarray):
-    source_img, source_scale = preprocess_image(source_img)
-    target_img, target_scale = preprocess_image(target_img)
-    
-    source_landmarks = get_landmarks(source_img)
-    target_landmarks = get_landmarks(target_img)
-    
-    if source_landmarks is None or target_landmarks is None:
-        raise HTTPException(status_code=400, detail="No faces detected in one or both images!")
-    
-    aligned_face = align_faces(source_img, target_img, source_landmarks, target_landmarks)
-    result_img = seamless_face_swap(source_img, target_img, aligned_face, target_landmarks)
-    
-    if target_scale < 1:
-        orig_h, orig_w = target_img.shape[:2]
-        result_img = cv2.resize(result_img, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
-    
-    _, buffer = cv2.imencode(".jpg", result_img)
-    return BytesIO(buffer)
+           # Encode the face image as JPEG
+           _, buffer = cv2.imencode(".jpg", face_img)
+           face_data = buffer.tobytes()
+           faces.append({
+               "index": face_idx,
+               "image": face_data,
+               "bounding_box": {"x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max}
+           })
+       return faces
 
-@app.post("/swap-faces/")
-async def swap_faces(source: UploadFile = File(...), target: UploadFile = File(...)):
-    try:
-        source_data = await source.read()
-        target_data = await target.read()
-        
-        source_img = cv2.imdecode(np.frombuffer(source_data, np.uint8), cv2.IMREAD_COLOR)
-        target_img = cv2.imdecode(np.frombuffer(target_data, np.uint8), cv2.IMREAD_COLOR)
-        
-        if source_img is None or target_img is None:
-            raise HTTPException(status_code=400, detail="Invalid image files!")
-        
-        result_io = await process_images(source_img, target_img)
-        
-        return StreamingResponse(result_io, media_type="image/jpeg", headers={"Content-Disposition": "attachment; filename=swapped_face_result.jpg"})
-    
-    except Exception as e:
-        logging.error(f"Error processing images: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+   def align_faces(source_img, target_img, source_landmarks, target_landmarks):
+       """Warps the source face to align with the target face."""
+       hull_source = cv2.convexHull(np.array(source_landmarks, dtype=np.int32))
+       hull_target = cv2.convexHull(np.array(target_landmarks, dtype=np.int32))
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+       rect = cv2.boundingRect(hull_source)
+       subdiv = cv2.Subdiv2D(rect)
+       for point in source_landmarks:
+           subdiv.insert(point)
+       triangles = subdiv.getTriangleList()
+       triangles = np.array(triangles, dtype=np.int32)
+
+       source_triangles = []
+       target_triangles = []
+       for t in triangles:
+           pt1 = (t[0], t[1])
+           pt2 = (t[2], t[3])
+           pt3 = (t[4], t[5])
+           idx1 = source_landmarks.index([pt1[0], pt1[1]]) if [pt1[0], pt1[1]] in source_landmarks else -1
+           idx2 = source_landmarks.index([pt2[0], pt2[1]]) if [pt2[0], pt2[1]] in source_landmarks else -1
+           idx3 = source_landmarks.index([pt3[0], pt3[1]]) if [pt3[0], pt3[1]] in source_landmarks else -1
+           if idx1 != -1 and idx2 != -1 and idx3 != -1:
+               source_triangles.append([idx1, idx2, idx3])
+               target_triangles.append([idx1, idx2, idx3])
+
+       warped_img = np.zeros_like(target_img)
+       for i in range(len(source_triangles)):
+           src_pts = np.float32([source_landmarks[source_triangles[i][0]],
+                                 source_landmarks[source_triangles[i][1]],
+                                 source_landmarks[source_triangles[i][2]]])
+           dst_pts = np.float32([target_landmarks[target_triangles[i][0]],
+                                 target_landmarks[target_triangles[i][1]],
+                                 target_landmarks[target_triangles[i][2]]])
+           M = cv2.getAffineTransform(src_pts, dst_pts)
+           warped_patch = cv2.warpAffine(source_img, M, (target_img.shape[1], target_img.shape[0]))
+           mask = np.zeros((target_img.shape[0], target_img.shape[1]), dtype=np.uint8)
+           cv2.fillConvexPoly(mask, np.array([dst_pts[0], dst_pts[1], dst_pts[2]], dtype=np.int32), 255)
+           warped_img = cv2.bitwise_and(warped_img, warped_img, mask=cv2.bitwise_not(mask))
+           warped_img = cv2.bitwise_or(warped_img, cv2.bitwise_and(warped_patch, warped_patch, mask=mask))
+       return warped_img
+
+   def seamless_face_swap(target_img, warped_face, target_landmarks):
+       """Blends the warped face into the target image."""
+       mask = np.zeros_like(target_img[:, :, 0])
+       hull = cv2.convexHull(np.array(target_landmarks, dtype=np.int32))
+       cv2.fillConvexPoly(mask, hull, 255)
+
+       kernel = np.ones((10, 10), np.uint8)
+       mask = cv2.dilate(mask, kernel, iterations=2)
+       mask = cv2.GaussianBlur(mask, (21, 21), 10)
+       mask_3d = cv2.merge([mask, mask, mask]) / 255.0
+
+       blended = (warped_face * mask_3d + target_img * (1 - mask_3d)).astype(np.uint8)
+       center = (int(np.mean(hull[:, 0, 0])), int(np.mean(hull[:, 0, 1])))
+       result_img = cv2.seamlessClone(blended, target_img, mask.astype(np.uint8) * 255, center, cv2.NORMAL_CLONE)
+       return result_img
+
+   @app.post("/detect-faces/")
+   async def detect_faces(target: UploadFile = File(...)):
+       """Detects and extracts all faces from the target image."""
+       try:
+           # Validate file type and size
+           if not target.content_type.startswith('image/'):
+               raise HTTPException(status_code=400, detail="Target must be an image file (e.g., JPG, PNG).")
+           if target.size > 5_000_000:
+               raise HTTPException(status_code=400, detail="Target image too large (max 5MB).")
+
+           # Read the target image
+           target_data = await target.read()
+           target_img = cv2.imdecode(np.frombuffer(target_data, np.uint8), cv2.IMREAD_COLOR)
+           if target_img is None:
+               raise HTTPException(status_code=400, detail="Invalid target image!")
+
+           # Extract faces
+           faces = extract_faces(target_img)
+           if not faces:
+               raise HTTPException(status_code=400, detail="No faces detected in the target image.")
+
+           # Return the list of faces with their base64-encoded images
+           import base64
+           faces_response = []
+           for face in faces:
+               faces_response.append({
+                   "index": face["index"],
+                   "image_base64": base64.b64encode(face["image"]).decode('utf-8'),
+                   "bounding_box": face["bounding_box"]
+               })
+           return JSONResponse(content={"faces": faces_response})
+       except Exception as e:
+           logging.error(f"Error detecting faces: {str(e)}")
+           raise HTTPException(status_code=500, detail=f"Failed to detect faces: {str(e)}")
+
+   @app.post("/swap-faces/")
+   async def swap_faces(source: UploadFile = File(...), target: UploadFile = File(...), face_index: int = 0):
+       """Swaps the face from the source image onto the selected face in the target image."""
+       try:
+           # Validate file types and sizes
+           if not source.content_type.startswith('image/'):
+               raise HTTPException(status_code=400, detail="Source must be an image file (e.g., JPG, PNG).")
+           if not target.content_type.startswith('image/'):
+               raise HTTPException(status_code=400, detail="Target must be an image file (e.g., JPG, PNG).")
+           if source.size > 5_000_000 or target.size > 5_000_000:
+               raise HTTPException(status_code=400, detail="Images too large!")
+
+           # Read the images
+           source_data = await source.read()
+           target_data = await target.read()
+           source_img = cv2.imdecode(np.frombuffer(source_data, np.uint8), cv2.IMREAD_COLOR)
+           target_img = cv2.imdecode(np.frombuffer(target_data, np.uint8), cv2.IMREAD_COLOR)
+
+           if source_img is None or target_img is None:
+               raise HTTPException(status_code=400, detail="Invalid image files!")
+
+           # Detect landmarks
+           source_landmarks = get_landmarks(source_img)
+           if source_landmarks is None:
+               raise HTTPException(status_code=400, detail="No face detected in the source image!")
+
+           target_landmarks = get_landmarks(target_img, face_index)
+           if target_landmarks is None:
+               raise HTTPException(status_code=400, detail=f"No face detected at index {face_index} in the target image!")
+
+           # Perform face swap
+           warped_face = align_faces(source_img, target_img, source_landmarks, target_landmarks)
+           result_img = seamless_face_swap(target_img, warped_face, target_landmarks)
+
+           # Encode the result image
+           _, buffer = cv2.imencode(".jpg", result_img)
+           return StreamingResponse(BytesIO(buffer.tobytes()), media_type="image/jpeg", headers={"Content-Disposition": "attachment; filename=swapped_face_result.jpg"})
+       except Exception as e:
+           logging.error(f"Error swapping faces: {str(e)}")
+           raise HTTPException(status_code=500, detail=f"Face swap failed: {str(e)}")
+
+   if __name__ == "__main__":
+       uvicorn.run(app, host="0.0.0.0", port=8000)
