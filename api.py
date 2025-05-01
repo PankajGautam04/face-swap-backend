@@ -66,7 +66,7 @@ def seamless_face_swap(target_img, aligned_face, target_landmarks):
 
     # Feather the edges of the mask
     kernel = np.ones((10, 10), np.uint8)
-    mask = cv2.dilate(mask, kernel, iterations=2)
+    # mask = cv2.dilate(mask, kernel, iterations=2)
     mask = cv2.GaussianBlur(mask, (21, 21), 10)
 
     # Create a 3-channel mask for blending
