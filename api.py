@@ -65,7 +65,7 @@ def seamless_face_swap(target_img, aligned_face, target_landmarks):
     cv2.fillConvexPoly(mask, hull, 255)
 
     # Feather the edges of the mask
-    kernel = np.ones((10, 10), np.uint8)
+    # kernel = np.ones((10, 10), np.uint8)
     # mask = cv2.dilate(mask, kernel, iterations=2)
     mask = cv2.GaussianBlur(mask, (21, 21), 10)
 
