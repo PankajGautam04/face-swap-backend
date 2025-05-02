@@ -143,5 +143,5 @@ async def swap_faces(
         logging.error(f"Error swapping faces: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Face swap failed: {str(e)}")
 
-if __name__ == "__main__":
+#if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
